@@ -36,7 +36,8 @@ import java.security.NoSuchAlgorithmException;
 
 /**
  * todo 可能存在的问题，写入太快的问题
- * todo bug文件放置位置问题
+ * 暂时不设置最大size，因为占用本来就不多
+ *
  */
 public class BugCat {
     private static final String MAGIC = "com.vgaw.bugcat";
@@ -308,6 +309,8 @@ public class BugCat {
 
     /**
      * Get a usable cache directory (external if available, internal otherwise).
+     * 放置位置对用户不可见（用户不能在文件浏览器中看到该文件，因为该文件对用户没有任何用处，显示出来反而干扰用户，而且被用户删除，又需要重新创建，影响效率）
+     * 尽量放在external storage，因为没必要放到internal storage
      *
      * @param context    The context to use
      * @param uniqueName A unique directory name to append to the cache dir
@@ -321,8 +324,8 @@ public class BugCat {
                         !isExternalStorageRemovable() ? getExternalCacheDir(context).getPath() :
                         context.getCacheDir().getPath();
 
-        //return new File(cachePath + File.separator + uniqueName);
-        return new File("/sdcard/" + uniqueName);
+        return new File(cachePath + File.separator + uniqueName);
+        /*return new File("/sdcard/" + uniqueName);*/
     }
 
     /**
