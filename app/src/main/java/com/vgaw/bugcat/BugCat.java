@@ -7,6 +7,8 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Environment;
 import android.util.Log;
+import android.util.StringBuilderPrinter;
+import android.widget.Toast;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -15,6 +17,7 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Field;
@@ -39,7 +42,7 @@ import java.security.NoSuchAlgorithmException;
  * 暂时不设置最大size，因为占用本来就不多
  *
  */
-public class BugCat {
+public class BugCat implements Thread.UncaughtExceptionHandler{
     private static final String MAGIC = "com.vgaw.bugcat";
     private static final String VERSION = "1.0";
     private static final String DIR_NAME = "bugbox";
@@ -87,6 +90,9 @@ public class BugCat {
         if (isAppVersionChanged(getAppVersion())) {
             writeHead();
         }
+
+        // 设置为程序的默认未捕获异常处理器
+        Thread.setDefaultUncaughtExceptionHandler(this);
     }
 
     private boolean writeNewKey(String key) {
@@ -178,6 +184,10 @@ public class BugCat {
             writeNewKey(key);
         }
 
+    }
+
+    public void deliverBug(Throwable ex){
+        deliverBug(getCrashInfo(ex));
     }
 
     /**
@@ -357,5 +367,43 @@ public class BugCat {
         // Before Froyo we need to construct the external cache dir ourselves
         final String cacheDir = "/Android/data/" + context.getPackageName() + "/cache/";
         return new File(Environment.getExternalStorageDirectory().getPath() + cacheDir);
+    }
+
+    @Override
+    public void uncaughtException(Thread thread, Throwable ex) {
+        handleException(ex);
+        // 退出程序
+        android.os.Process.killProcess(android.os.Process.myPid());
+        System.exit(1);
+    }
+
+    /**
+     * 处理捕获的未捕获异常
+     *
+     * bug形式如下：
+     *
+     * bug  :/ by zero
+     * cause:null
+     * path :12->fun->Test->Test.java
+     *
+     * @param ex
+     */
+    protected void handleException(Throwable ex){
+        Toast.makeText(context, "很抱歉,程序出现异常,即将退出.", Toast.LENGTH_SHORT).show();
+        deliverBug(ex);
+    }
+
+    // TODO: 2015-12-11 信息是否详细待测
+    private String getCrashInfo(Throwable ex){
+        StackTraceElement[] elements = ex.getStackTrace();
+        if (elements.length == 0){
+            return "get crash info failed";
+        }
+        StackTraceElement element0 = ex.getStackTrace()[0];
+        String bug = "bug  :" + ex.getMessage();
+        String cause = "cause:" + ex.getCause();
+        String path = "path :" + element0.getLineNumber() + "->" + element0.getMethodName() + "->" + element0.getClassName() + "->" + element0.getFileName();
+        System.out.println(bug + "\n" + cause + "\n" + path);
+        return bug + "\n" + cause + "\n" + path;
     }
 }
