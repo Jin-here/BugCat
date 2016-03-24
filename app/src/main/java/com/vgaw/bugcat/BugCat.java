@@ -1,14 +1,23 @@
 package com.vgaw.bugcat;
 
 import android.annotation.TargetApi;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Environment;
+import android.os.Handler;
 import android.util.Log;
 import android.util.StringBuilderPrinter;
 import android.widget.Toast;
+
+import com.google.gson.Gson;
+import com.vgaw.bugcat.http.HttpCat;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -23,6 +32,8 @@ import java.io.Writer;
 import java.lang.reflect.Field;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashMap;
 
 /**
  * context of bug file(filepath is "../bugbox/bug") is like below:
@@ -43,29 +54,28 @@ import java.security.NoSuchAlgorithmException;
  *
  */
 public class BugCat implements Thread.UncaughtExceptionHandler{
-    private static final String MAGIC = "com.vgaw.bugcat";
-    private static final String VERSION = "1.0";
-    private static final String DIR_NAME = "bugbox";
-    private static final String FILE_NAME = "bug";
+    private final String MAGIC = "com.vgaw.bugcat";
+    private final String VERSION = "1.0";
+    private final String DIR_NAME = "bugbox";
+    private final String FILE_NAME = "bug";
 
-    private static final int MAGIC_INDEX = 1;
-    private static final int VERSION_INDEX = 3;
-    private static final int APP_VERSION_INDEX = 5;
-    private static final int HEAD_END_INDEX = 7;
+    private final int MAGIC_INDEX = 1;
+    private final int VERSION_INDEX = 3;
+    private final int APP_VERSION_INDEX = 5;
+    private final int HEAD_END_INDEX = 4;
 
-    private static BugCat instance;
+    private final String UPLOADED = "U";
+    private final String NEW = "N";
+
+    private static BugCat instance = new BugCat();
     private File file;
+    private File dir;
     private Context context;
 
     private BugCat() {
     }
 
     public static BugCat getInstance() {
-        synchronized (BugCat.class) {
-            if (instance == null) {
-                instance = new BugCat();
-            }
-        }
         return instance;
     }
 
@@ -77,7 +87,7 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     public void initial(Context context) {
         this.context = context;
         // 若文件不存在，则创建，并写入head
-        File dir = getDiskCacheDir(context, DIR_NAME);
+        dir = getDiskCacheDir(context, DIR_NAME);
         if (!dir.exists()) {
             dir.mkdirs();
         }
@@ -86,13 +96,24 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
             writeHead();
         }
 
-        // 如果版本变更，清空，再重新写入head
+        /*// 如果版本变更，清空，再重新写入head
         if (isAppVersionChanged(getAppVersion())) {
             writeHead();
-        }
+        }*/
 
         // 设置为程序的默认未捕获异常处理器
         Thread.setDefaultUncaughtExceptionHandler(this);
+
+        // 注册Wifi监听器
+        registerReceiver();
+    }
+
+    /**
+     * 解除监听器，使用注意点同receiver
+     */
+    public void release(){
+        unregisterReceiver();
+        writeTemp();
     }
 
     private boolean writeNewKey(String key) {
@@ -114,17 +135,21 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
         }
     }
 
-    private boolean isKeyExist(String key) {
+    private int isKeyExist(String key) {
         BufferedReader reader = null;
         try {
             reader = new BufferedReader(new FileReader(file));
             if ((runToLine(reader, HEAD_END_INDEX)) != null) {
                 String line = null;
                 while ((line = reader.readLine()) != null) {
-                    if (line.equals(key)) {
-                        return true;
+                    String[] splits = line.split(" ");
+                    if (splits[0].equals(key)){
+                        if (NEW.equals(splits[1])){
+                            return 1;
+                        }else if (UPLOADED.equals(splits[1])){
+                            return 2;
+                        }
                     }
-                    continue;
                 }
             }
         } catch (FileNotFoundException e) {
@@ -138,7 +163,7 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                 }
             }
         }
-        return false;
+        return 0;
     }
 
     /**
@@ -174,14 +199,102 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     }
 
     /**
-     * 提交bug入口，只提交一次，不管提交失不失败
+     * 仅仅将bug存在本地，带下次启动应用时再上传
      *
      * @param bugInfo
      */
     public void deliverBug(String bugInfo) {
         String key = hashKeyForDisk(bugInfo);
-        if (!isKeyExist(key)) {
-            writeNewKey(key);
+        if (isKeyExist(key) == 0) {
+            writeNewKey(key + " " + NEW);
+            // 将bug信息以单个文件形式保存，并以key为文件名放于根目录下
+            persistBug(key, bugInfo);
+        }
+
+    }
+
+    private ArrayList<String> bugList = new ArrayList<>();
+    private ArrayList<String> tempList = new ArrayList<>();
+
+    private void uploadStepByStep(){
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader(file));
+            // 将bug中的除去头信息全部缓存到bugList中
+            for (int i = 0;i < HEAD_END_INDEX;i++){
+                reader.readLine();
+            }
+            String s = null;
+            while ((s = reader.readLine()) != null){
+                bugList.add(s);
+                tempList.add(s);
+            }
+            if (bugList.size() < 1){
+                return;
+            }
+            // 逐条读取，并逐条上传，上传成功后，在修改状态
+            // 当程序关闭时，用缓存覆写原来的bug文件
+            for (int i = 0;i < bugList.size();i++){
+                final String[] splits = bugList.get(i).split(" ");
+                if (splits[1].equals(NEW)){
+                    // 读取文件内容
+                    final File bugFile = new File(dir, splits[0]);
+                    BufferedReader r = new BufferedReader(new FileReader(bugFile));
+                    StringBuilder sb = new StringBuilder();
+                    String temp = null;
+                    while ((temp = r.readLine()) != null) {
+                        sb.append(temp + "\n");
+                    }
+                    if (r != null){
+                        r.close();
+                    }
+                    // 上传信息
+                    Gson gson = new Gson();
+                    HttpCat.fly(gson.toJson(new Req().setBugInfo(sb.toString()).setIndex(i), Req.class)
+                            , new HttpCat.AbstractResponseListener(){
+                        @Override
+                        public void onSuccess(String flyCat) {
+                            super.onSuccess(flyCat);
+                            int index = Integer.parseInt(flyCat);
+                            // 更新状态
+                            String key = tempList.get(index).split(" ")[0];
+                            tempList.set(index, key + " " + UPLOADED);
+                            // 删除bug信息文件
+                            new File(dir, key).delete();
+                        }
+                    });
+                }
+            }
+        } catch (FileNotFoundException e) {
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            if (reader != null){
+                try {
+                    reader.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    // 以key为文件名，将bug信息存入该文件中。该文件位于根目录下
+    private void persistBug(String key, String bugInfo) {
+        File file = new File(dir, key);
+        BufferedWriter writer = null;
+        try {
+            writer = new BufferedWriter(new FileWriter(file));
+            writer.write(bugInfo);
+        } catch (IOException e) {
+        } finally {
+            if (writer != null) {
+                try {
+                    writer.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
 
     }
@@ -334,8 +447,8 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                         !isExternalStorageRemovable() ? getExternalCacheDir(context).getPath() :
                         context.getCacheDir().getPath();
 
-        return new File(cachePath + File.separator + uniqueName);
-        /*return new File("/sdcard/" + uniqueName);*/
+        /*return new File(cachePath + File.separator + uniqueName);*/
+        return new File("/sdcard/" + uniqueName);
     }
 
     /**
@@ -371,10 +484,35 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
 
     @Override
     public void uncaughtException(Thread thread, Throwable ex) {
+        writeTemp();
         handleException(ex);
         // 退出程序
         android.os.Process.killProcess(android.os.Process.myPid());
         System.exit(1);
+    }
+
+    private void writeTemp(){
+        if (tempList == null){
+            return;
+        }
+        BufferedWriter writer = null;
+        try {
+            writeHead();
+            writer = new BufferedWriter(new FileWriter(file, true));
+            for (String info : tempList){
+                writer.write(info + "\n");
+            }
+            tempList = null;
+        } catch (IOException e) {
+        }finally {
+            if (writer != null){
+                try {
+                    writer.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
     }
 
     /**
@@ -405,5 +543,57 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
         String path = "path :" + element0.getLineNumber() + "->" + element0.getMethodName() + "->" + element0.getClassName() + "->" + element0.getFileName();
         System.out.println(bug + "\n" + cause + "\n" + path);
         return bug + "\n" + cause + "\n" + path;
+    }
+
+    public class ConnectionChangeReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            ConnectivityManager connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo wifiNetInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+            uploadStepByStep();
+            /*if (wifiNetInfo.isConnected()) {
+                // 在打开wifi的情况下，上传bug信息
+                uploadStepByStep();
+            }*/
+        }
+    }
+
+    private ConnectionChangeReceiver receiver = null;
+
+    private void registerReceiver() {
+        IntentFilter filter = new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION);
+        receiver = new ConnectionChangeReceiver();
+        context.registerReceiver(receiver, filter);
+    }
+
+    private void unregisterReceiver() {
+        if (receiver != null) {
+            context.unregisterReceiver(receiver);
+        }
+    }
+
+    private class Req{
+        String bugInfo;
+        int index;
+
+        public Req(){}
+
+        public String getBugInfo() {
+            return bugInfo;
+        }
+
+        public Req setBugInfo(String bugInfo) {
+            this.bugInfo = bugInfo;
+            return this;
+        }
+
+        public int getIndex() {
+            return index;
+        }
+
+        public Req setIndex(int index) {
+            this.index = index;
+            return this;
+        }
     }
 }

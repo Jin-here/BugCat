@@ -3,6 +3,7 @@ package com.vgaw.bugcat;
 import android.os.Environment;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
@@ -27,8 +28,15 @@ public class MainActivity extends AppCompatActivity {
         btn_bug.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                BugCat.getInstance().deliverBug(String.valueOf(System.currentTimeMillis()));
+                //BugCat.getInstance().deliverBug(String.valueOf(System.currentTimeMillis()));
+                Log.e("fuck", String.valueOf(1/0));
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        BugCat.getInstance().release();
+        super.onDestroy();
     }
 }
