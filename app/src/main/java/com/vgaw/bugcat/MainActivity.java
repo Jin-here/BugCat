@@ -3,6 +3,7 @@ package com.vgaw.bugcat;
 import android.os.Environment;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
@@ -27,8 +28,17 @@ public class MainActivity extends AppCompatActivity {
         btn_bug.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                // 主动提交bug，可以放在try-catch中
                 BugCat.getInstance().deliverBug(String.valueOf(System.currentTimeMillis()));
+                // 被动触发，会自动获取
+                Log.e("fuck", String.valueOf(1 / 0));
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        BugCat.getInstance().release();
     }
 }
