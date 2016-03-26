@@ -11,9 +11,6 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Environment;
-import android.os.Handler;
-import android.util.Log;
-import android.util.StringBuilderPrinter;
 import android.widget.Toast;
 
 import com.google.gson.Gson;
@@ -26,14 +23,11 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.Reader;
-import java.io.Writer;
 import java.lang.reflect.Field;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * context of bug file(filepath is "../bugbox/bug") is like below:
@@ -50,10 +44,9 @@ import java.util.HashMap;
 
 /**
  * todo 可能存在的问题，写入太快的问题
- * 暂时不设置最大size，因为占用本来就不多
- *
+ * 不设置最大size，因为一旦上传就会删除具体bug信息文件
  */
-public class BugCat implements Thread.UncaughtExceptionHandler{
+public class BugCat implements Thread.UncaughtExceptionHandler {
     private final String MAGIC = "com.vgaw.bugcat";
     private final String VERSION = "1.0";
     private final String DIR_NAME = "bugbox";
@@ -67,10 +60,24 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     private final String UPLOADED = "U";
     private final String NEW = "N";
 
+    // 上传成功
+    private final int U_SUCCESS = 0x77;
+    // 上传中
+    private final int U_ONGOING = 0x78;
+    // 上传到一半，突然崩溃
+    private final int U_BREAK = 0x79;
+
+    private int state = 0;
+
     private static BugCat instance = new BugCat();
     private File file;
     private File dir;
     private Context context;
+
+    /**
+     * 标识所有请求是否结束
+     */
+    private AtomicInteger flag = new AtomicInteger(0);
 
     private BugCat() {
     }
@@ -86,7 +93,7 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
      */
     public void initial(Context context) {
         this.context = context;
-        // 若文件不存在，则创建，并写入head
+        // 若根目录不存在，则创建
         dir = getDiskCacheDir(context, DIR_NAME);
         if (!dir.exists()) {
             dir.mkdirs();
@@ -111,7 +118,7 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     /**
      * 解除监听器，使用注意点同receiver
      */
-    public void release(){
+    public void release() {
         unregisterReceiver();
         writeTemp();
     }
@@ -143,17 +150,15 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                 String line = null;
                 while ((line = reader.readLine()) != null) {
                     String[] splits = line.split(" ");
-                    if (splits[0].equals(key)){
-                        if (NEW.equals(splits[1])){
+                    if (splits[0].equals(key)) {
+                        if (NEW.equals(splits[1])) {
                             return 1;
-                        }else if (UPLOADED.equals(splits[1])){
+                        } else if (UPLOADED.equals(splits[1])) {
                             return 2;
                         }
                     }
                 }
             }
-        } catch (FileNotFoundException e) {
-            // 文件不存在
         } catch (IOException e) {
         } finally {
             if (reader != null) {
@@ -178,18 +183,14 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     }
 
     private void writeHead() {
-        Writer writer = null;
+        BufferedWriter writer = null;
         try {
             writer = new BufferedWriter(new FileWriter(file));
-            writer.write(MAGIC);
-            writer.write("\n");
-            writer.write(VERSION);
-            writer.write("\n");
-            writer.write(getAppVersion());
-            writer.write("\n");
+            writer.write(MAGIC + "\n");
+            writer.write(VERSION + "\n");
+            writer.write(getAppVersion() + "\n");
             writer.write("\n");
         } catch (IOException e) {
-            e.printStackTrace();
         } finally {
             try {
                 writer.close();
@@ -216,28 +217,30 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
     private ArrayList<String> bugList = new ArrayList<>();
     private ArrayList<String> tempList = new ArrayList<>();
 
-    private void uploadStepByStep(){
+    /**
+     * 一条一条信息上传
+     */
+    private void uploadStepByStep() {
         BufferedReader reader = null;
         try {
-            reader = new BufferedReader(new FileReader(file));
             // 将bug中的除去头信息全部缓存到bugList中
-            for (int i = 0;i < HEAD_END_INDEX;i++){
-                reader.readLine();
+            reader = new BufferedReader(new FileReader(file));
+            runToLine(reader, HEAD_END_INDEX);
+            String line = null;
+            while ((line = reader.readLine()) != null) {
+                bugList.add(line);
+                tempList.add(line);
             }
-            String s = null;
-            while ((s = reader.readLine()) != null){
-                bugList.add(s);
-                tempList.add(s);
-            }
-            if (bugList.size() < 1){
+            // 如果没有需要上传的信息，则返回
+            if (bugList.size() < 1) {
                 return;
             }
             // 逐条读取，并逐条上传，上传成功后，在修改状态
             // 当程序关闭时，用缓存覆写原来的bug文件
-            for (int i = 0;i < bugList.size();i++){
+            for (int i = 0; i < bugList.size(); i++) {
                 final String[] splits = bugList.get(i).split(" ");
-                if (splits[1].equals(NEW)){
-                    // 读取文件内容
+                if (splits[1].equals(NEW)) {
+                    // 读取具体bug信息
                     final File bugFile = new File(dir, splits[0]);
                     BufferedReader r = new BufferedReader(new FileReader(bugFile));
                     StringBuilder sb = new StringBuilder();
@@ -245,35 +248,42 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                     while ((temp = r.readLine()) != null) {
                         sb.append(temp + "\n");
                     }
-                    if (r != null){
+                    if (r != null) {
                         r.close();
                     }
                     // 上传信息
                     Gson gson = new Gson();
-                    HttpCat.fly(gson.toJson(new Req().setBugInfo(sb.toString()).setIndex(i), Req.class)
-                            , new HttpCat.AbstractResponseListener(){
-                        @Override
-                        public void onSuccess(String flyCat) {
-                            super.onSuccess(flyCat);
-                            int index = Integer.parseInt(flyCat);
-                            // 更新状态
-                            String key = tempList.get(index).split(" ")[0];
-                            tempList.set(index, key + " " + UPLOADED);
-                            // 删除bug信息文件
-                            new File(dir, key).delete();
-                        }
-                    });
+                    // 标识加一
+                    flag.getAndIncrement();
+                    state = U_ONGOING;
+                    if (state != U_BREAK){
+                        HttpCat.fly(gson.toJson(new Req().setBugInfo(sb.toString()).setIndex(i), Req.class)
+                                , new HttpCat.AbstractResponseListener() {
+                            @Override
+                            public void onSuccess(String flyCat) {
+                                int index = Integer.parseInt(flyCat);
+                                // 更新状态
+                                String key = tempList.get(index).split(" ")[0];
+                                tempList.set(index, key + " " + UPLOADED);
+                                // 删除保存bug具体信息的文件
+                                new File(dir, key).delete();
+                                if (flag.decrementAndGet() == 0) {
+                                    // 若所有请求完成，则本地化
+                                    state = U_SUCCESS;
+                                    writeTemp();
+                                }
+                            }
+                        });
+                    }
                 }
             }
         } catch (FileNotFoundException e) {
         } catch (IOException e) {
-            e.printStackTrace();
         } finally {
-            if (reader != null){
+            if (reader != null) {
                 try {
                     reader.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
                 }
             }
         }
@@ -292,14 +302,13 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                 try {
                     writer.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
                 }
             }
         }
 
     }
 
-    public void deliverBug(Throwable ex){
+    public void deliverBug(Throwable ex) {
         deliverBug(getCrashInfo(ex));
     }
 
@@ -309,8 +318,8 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
      * @return 若写入head不完整，则返回null
      */
     private String readAppVersion() {
-        BufferedReader reader = null;
         String version = null;
+        BufferedReader reader = null;
         try {
             reader = new BufferedReader(new FileReader(file));
             if ((version = runToLine(reader, APP_VERSION_INDEX)) == null) {
@@ -319,9 +328,8 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
                 version = getAppVersion();
             }
         } catch (FileNotFoundException e) {
-            // 文件不存在
-        } finally {
-            if (reader != null) {
+        }finally {
+            if (reader != null){
                 try {
                     reader.close();
                 } catch (IOException e) {
@@ -332,22 +340,14 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
 
     }
 
-    /**
-     * 如果index大于文件目前的行数返回null
-     *
-     * @param reader
-     * @param index
-     * @return
-     */
     private String runToLine(BufferedReader reader, int index) {
         String line = null;
-        for (int i = 0; i < index; i++) {
-            try {
+        try {
+            for (int i = 0; i < index; i++) {
+                // 超过最大行数将会返回null
                 line = reader.readLine();
-            } catch (IOException e) {
-                // 读到文件末尾
-                return null;
             }
+        } catch (IOException e) {
         }
         return line;
     }
@@ -491,25 +491,30 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
         System.exit(1);
     }
 
-    private void writeTemp(){
-        if (tempList == null){
+    private synchronized void writeTemp() {
+        if (state != U_ONGOING && state != U_SUCCESS){
+            return;
+        }
+        if (state == U_ONGOING){
+            state = U_BREAK;
+        }
+        if (tempList == null || tempList.size() == 0) {
             return;
         }
         BufferedWriter writer = null;
         try {
             writeHead();
             writer = new BufferedWriter(new FileWriter(file, true));
-            for (String info : tempList){
+            for (String info : tempList) {
                 writer.write(info + "\n");
             }
             tempList = null;
         } catch (IOException e) {
-        }finally {
-            if (writer != null){
+        } finally {
+            if (writer != null) {
                 try {
                     writer.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
                 }
             }
         }
@@ -517,24 +522,24 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
 
     /**
      * 处理捕获的未捕获异常
-     *
+     * <p/>
      * bug形式如下：
-     *
+     * <p/>
      * bug  :/ by zero
      * cause:null
      * path :12->fun->Test->Test.java
      *
      * @param ex
      */
-    protected void handleException(Throwable ex){
+    protected void handleException(Throwable ex) {
         Toast.makeText(context, "很抱歉,程序出现异常,即将退出.", Toast.LENGTH_SHORT).show();
         deliverBug(ex);
     }
 
     // TODO: 2015-12-11 信息是否详细待测
-    private String getCrashInfo(Throwable ex){
+    private String getCrashInfo(Throwable ex) {
         StackTraceElement[] elements = ex.getStackTrace();
-        if (elements.length == 0){
+        if (elements.length == 0) {
             return "get crash info failed";
         }
         StackTraceElement element0 = ex.getStackTrace()[0];
@@ -572,11 +577,12 @@ public class BugCat implements Thread.UncaughtExceptionHandler{
         }
     }
 
-    private class Req{
+    private class Req {
         String bugInfo;
         int index;
 
-        public Req(){}
+        public Req() {
+        }
 
         public String getBugInfo() {
             return bugInfo;

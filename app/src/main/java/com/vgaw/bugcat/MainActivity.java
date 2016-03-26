@@ -28,8 +28,7 @@ public class MainActivity extends AppCompatActivity {
         btn_bug.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                //BugCat.getInstance().deliverBug(String.valueOf(System.currentTimeMillis()));
-                Log.e("fuck", String.valueOf(1/0));
+                BugCat.getInstance().deliverBug(String.valueOf(System.currentTimeMillis()));
             }
         });
     }
